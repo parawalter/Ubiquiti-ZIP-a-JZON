@@ -1,0 +1,5 @@
+customtkinter
+pymongo
+tkinterdnd2-universal
+# Para manejo de BSON si pymongo no lo trae directo
+bson

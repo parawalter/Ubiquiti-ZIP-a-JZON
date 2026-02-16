@@ -1,0 +1,9 @@
+__pycache__/
+build/
+dist/
+*.spec
+error.log
+venv/
+.env
+.vscode/
+.idea/
