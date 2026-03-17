@@ -42,5 +42,13 @@ Una de las mayores ventajas de obtener un JSON estructurado es su interoperabili
 2. Instala dependencias: `pip install -r requirements.txt`.
 3. Ejecuta `python main.py` o usa el ejecutable en la carpeta `dist`.
 
+### ⚠️ Solución de problemas comunes
+Si ves el error: `ImportError: cannot import name 'decode_all' from 'bson'`, es debido a un conflicto entre los paquetes `bson` y `pymongo`. Para solucionarlo, ejecuta estos comandos en tu terminal:
+
+```powershell
+pip uninstall bson pymongo
+pip install pymongo
+```
+
 ---
 *Desarrollado para facilitar la gestión de redes Ubiquiti con tecnología moderna.*

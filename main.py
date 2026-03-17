@@ -1,12 +1,13 @@
 """
 Autor: Ing. Walter Rodríguez
-Fecha: 16/02/2026
-Descripción: Interfaz gráfica moderna para UniFi UNF Extractor usando customtkinter y TkinterDnD2.
+Fecha: 17/03/2026
+Descripción: Interfaz gráfica moderna para UniFi UNF Extractor usando customtkinter.
+             Actualización: Integrado soporte nativo para .unf con clave AES oficial de Ubiquiti.
+             Fuente de clave: https://github.com/zhangyoufu/unifi-backup-decrypt
 """
 
 import os
 import threading
-import webbrowser
 import customtkinter as ctk
 from tkinter import filedialog, messagebox, Canvas
 from extractor import UnifiExtractor
@@ -25,7 +26,7 @@ class App(ctk.CTk):
         self.version = "v1.0.0"
         self.author = "Ing. Walter Rodríguez"
         self.description = "Esta herramienta permite extraer y convertir archivos de backup (.unf) de UniFi Network a un formato JSON legible, facilitando la auditoría y migración de configuraciones de red, redes WiFi y dispositivos."
-        self.selected_file = None
+        self.selected_file = None  # Archivo seleccionado por el usuario
 
         # 2. Configurar ventana y centrar
         self.title(f"UniFi UNF to JSON Extractor - {self.version}")
@@ -85,17 +86,6 @@ class App(ctk.CTk):
         )
         self.desc_label.grid(row=2, column=0, padx=40, pady=(0, 20))
 
-        # Botón de ayuda para conversión web
-        self.help_button = ctk.CTkButton(
-            self,
-            text="¿No tienes el ZIP? Convierte tu .unf aquí primero",
-            font=ctk.CTkFont(size=11, underline=True),
-            fg_color="transparent",
-            text_color="#3B8ED0",
-            hover_color="#333333",
-            command=self.open_helper_link
-        )
-        self.help_button.grid(row=3, column=0, padx=20, pady=(0, 10))
 
         # Zona de Selección (Simplificada)
         self.drop_frame = ctk.CTkFrame(self, border_width=2, border_color="#3B8ED0", fg_color="#2B2B2B")
@@ -105,7 +95,7 @@ class App(ctk.CTk):
 
         self.drop_label = ctk.CTkLabel(
             self.drop_frame, 
-            text="Selecciona el archivo .zip descargado de UniHosted",
+            text="Selecciona tu archivo .unf o .zip de UniFi",
             font=ctk.CTkFont(size=14)
         )
         self.drop_label.grid(row=0, column=0, padx=20, pady=40)
@@ -116,7 +106,7 @@ class App(ctk.CTk):
 
         self.select_button = ctk.CTkButton(
             self.button_frame, 
-            text="Seleccionar Archivo ZIP", 
+            text="Seleccionar Archivo .unf / .zip", 
             command=self.browse_file,
             width=200,
             height=40,
@@ -176,9 +166,11 @@ class App(ctk.CTk):
 
     def browse_file(self):
         file_path = filedialog.askopenfilename(
-            title="Seleccionar ZIP de UniFi",
+            title="Seleccionar backup de UniFi",
             filetypes=[
-                ("Archivo ZIP de UniFi", "*.zip"),
+                ("Archivos de backup UniFi", "*.zip *.unf"),
+                ("Archivo ZIP", "*.zip"),
+                ("Archivo UNF", "*.unf"),
                 ("Todos los archivos", "*.*")
             ]
         )
@@ -224,8 +216,6 @@ class App(ctk.CTk):
             self.convert_button.configure(state="normal")
             self.select_button.configure(state="normal")
 
-    def open_helper_link(self):
-        webbrowser.open(self.helper_url)
 
 if __name__ == "__main__":
     app = App()

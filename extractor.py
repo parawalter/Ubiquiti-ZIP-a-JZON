@@ -1,7 +1,10 @@
 """
 Autor: Ing. Walter Rodríguez
-Fecha: 16/02/2026
+Fecha: 17/03/2026
 Descripción: Lógica de extracción y conversión de archivos .unf de UniFi a JSON.
+             Actualización: Se corrigió la clave AES real de Ubiquiti (bcyangkmluohmars / ubntenterpriseap),
+             descubierta desde el código fuente en https://github.com/zhangyoufu/unifi-backup-decrypt
+             Esto permite desencriptar .unf directamente sin herramientas externas.
 """
 
 import os
@@ -12,19 +15,17 @@ import json
 import tempfile
 from bson import decode_all
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
-from cryptography.hazmat.primitives import hashes
-from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 from cryptography.hazmat.backends import default_backend
-
-import hashlib
 
 class UnifiExtractor:
     def __init__(self, progress_callback=None, log_callback=None):
         self.progress_callback = progress_callback
         self.log_callback = log_callback
-        # Clave estándar para backups de UniFi
-        self.key = "ubntrocks!"
-        self.iv_bytes = b'\x00' * 16
+        # Clave y IV reales de Ubiquiti, extraídos del código fuente oficial.
+        # Fuente: https://github.com/zhangyoufu/unifi-backup-decrypt
+        # Algoritmo: AES/CBC/NoPadding con clave de 16 bytes e IV de 16 bytes
+        self.key = b"bcyangkmluohmars"  # 16 bytes -> AES-128
+        self.iv_bytes = b"ubntenterpriseap"  # 16 bytes de IV real
 
     def log(self, message):
         if self.log_callback:
@@ -52,7 +53,7 @@ class UnifiExtractor:
             success = False
             last_error = ""
 
-            # 1. Verificar si es ZIP directo
+            # 1. Verificar si es ZIP directo (algunos backups ya vienen sin encriptar)
             if zipfile.is_zipfile(unf_path):
                 self.log("Archivo ZIP detectado (sin encriptación).")
                 with open(decrypted_zip, 'wb') as f:
@@ -60,43 +61,28 @@ class UnifiExtractor:
                 success = True
             else:
                 try:
-                    self.log("Desencriptando usando método nativo AES...")
-                    
-                    # Derivación de clave UniFi: MD5 de "ubntrocks!"
-                    key_hash = hashlib.md5(self.key.encode()).digest() # 16 bytes
-                    
-                    # Datos a desencriptar (saltar cabecera 'Salted__' si existe)
-                    data_to_decrypt = encrypted_data
-                    if encrypted_data.startswith(b'Salted__'):
-                        self.log("Detectado formato Salted de OpenSSL.")
-                        data_to_decrypt = encrypted_data[16:]
-
-                    # Probar AES-128-CBC (clave 16 bytes)
-                    cipher = Cipher(algorithms.AES(key_hash), modes.CBC(self.iv_bytes), backend=default_backend())
+                    self.log("Desencriptando archivo .unf con clave oficial de Ubiquiti (AES-128-CBC)...")
+                    # Clave real: 'bcyangkmluohmars', IV real: 'ubntenterpriseap'
+                    # Fuente: https://github.com/zhangyoufu/unifi-backup-decrypt
+                    cipher = Cipher(
+                        algorithms.AES(self.key),
+                        modes.CBC(self.iv_bytes),
+                        backend=default_backend()
+                    )
                     decryptor = cipher.decryptor()
-                    decrypted_bytes = decryptor.update(data_to_decrypt) + decryptor.finalize()
-                    
+                    decrypted_bytes = decryptor.update(encrypted_data) + decryptor.finalize()
+
                     with open(decrypted_zip, 'wb') as f:
                         f.write(decrypted_bytes)
-                    
+
                     if zipfile.is_zipfile(decrypted_zip):
                         success = True
-                        self.log("¡Desencriptación exitosa (128-bit)!")
+                        self.log("¡Desencriptación exitosa con clave oficial Ubiquiti!")
                     else:
-                        # Probar AES-256-CBC (clave 32 bytes = MD5 duplicado, común en versiones viejas)
-                        key_hash_32 = key_hash * 2
-                        cipher = Cipher(algorithms.AES(key_hash_32), modes.CBC(self.iv_bytes), backend=default_backend())
-                        decryptor = cipher.decryptor()
-                        decrypted_bytes = decryptor.update(data_to_decrypt) + decryptor.finalize()
-                        
-                        with open(decrypted_zip, 'wb') as f:
-                            f.write(decrypted_bytes)
-                        
-                        if zipfile.is_zipfile(decrypted_zip):
-                            success = True
-                            self.log("¡Desencriptación exitosa (256-bit)!")
-                        else:
-                            raise Exception("Formato de encriptación no reconocido.")
+                        raise Exception(
+                            "El archivo no pudo ser desencriptado. "
+                            "Asegúrate de que sea un backup válido de UniFi Network (.unf o .zip)."
+                        )
 
                 except Exception as e:
                     last_error = str(e)
