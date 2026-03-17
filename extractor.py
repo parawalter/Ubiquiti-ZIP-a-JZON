@@ -2,12 +2,9 @@
 Autor: Ing. Walter Rodríguez
 Fecha: 17/03/2026
 Descripción: Lógica de extracción y conversión de archivos .unf de UniFi a JSON.
-             Algoritmo oficial de desencriptación:
-               - Clave AES-128-CBC: bcyangkmluohmars
-               - IV: ubntenterpriseap
-               - Modo: NoPadding → ZIP puede tener Central Directory corrupto.
-             Se implementa extracción forzada escaneando Local File Headers (PK\x03\x04),
-             equivalente al 'zip -FF' del script bash oficial.
+             Algoritmo oficial de desencriptación AES-128-CBC NoPadding.
+             La extracción forzada usa zlib.decompressobj con unused_data para detectar
+             automáticamente el fin de cada stream deflate sin necesitar el comp_size.
              Fuente: https://github.com/zhangyoufu/unifi-backup-decrypt
 """
 
@@ -24,9 +21,8 @@ from bson import decode_all
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from cryptography.hazmat.backends import default_backend
 
-# Firmas ZIP conocidas
-ZIP_LOCAL_HEADER  = b'PK\x03\x04'  # Local file header
-ZIP_EOCD          = b'PK\x05\x06'  # End of Central Directory
+ZIP_LOCAL_HEADER = b'PK\x03\x04'
+ZIP_DATA_DESC    = b'PK\x07\x08'
 
 
 class UnifiExtractor:
@@ -47,33 +43,28 @@ class UnifiExtractor:
             self.progress_callback(value)
 
     # ------------------------------------------------------------------
-    # Extracción forzada: escanea Local File Headers sin Central Directory
-    # Equivale al comportamiento de 'zip -FF' en el script bash oficial
+    # Extracción forzada: escanea Local File Headers sin depender del
+    # Central Directory (que queda corrupto con AES NoPadding).
+    # Para Deflate usa zlib.decompressobj + unused_data → detecta
+    # automáticamente el fin del stream, sin importar comp_size.
     # ------------------------------------------------------------------
     def _force_extract(self, zip_bytes, extract_path):
-        """
-        Parsea manualmente los Local File Headers (PK\\x03\\x04) del ZIP,
-        ignorando el Central Directory (que puede estar corrupto con NoPadding).
-        Soporta almacenamiento (method=0) y deflate (method=8).
-        """
         data = zip_bytes
         pos  = 0
         extracted = []
+        failed    = []
 
         while pos < len(data) - 4:
-            # Buscar siguiente Local File Header
+            # Buscar próximo Local File Header
             idx = data.find(ZIP_LOCAL_HEADER, pos)
             if idx == -1:
                 break
             pos = idx
 
-            # Verificar que hay suficientes bytes para leer el header (30 bytes mínimo)
             if pos + 30 > len(data):
                 break
 
-            # Parsear campos del Local File Header
-            # Estructura: sig(4) ver(2) flag(2) method(2) mtime(2) mdate(2)
-            #             crc32(4) comp_size(4) uncomp_size(4) fname_len(2) extra_len(2)
+            # Parsear header (30 bytes fijos)
             try:
                 (sig, ver_needed, flags, method,
                  mod_time, mod_date, crc32,
@@ -87,65 +78,78 @@ class UnifiExtractor:
                 pos += 1
                 continue
 
-            header_end = pos + 30 + fname_len + extra_len
+            file_data_start = pos + 30 + fname_len + extra_len
 
             # Leer nombre del archivo
             try:
                 fname = data[pos + 30: pos + 30 + fname_len].decode('utf-8', errors='replace')
             except Exception:
-                pos += 1
+                pos = file_data_start + 1
                 continue
 
             # Ignorar entradas de directorio
             if fname.endswith('/') or fname.endswith('\\'):
-                pos = header_end
+                pos = file_data_start
                 continue
 
-            # Si comp_size == 0 y hay Data Descriptor (flag bit 3), estimar tamaño
-            file_data_start = header_end
-            if comp_size == 0 and (flags & 0x08):
-                # Buscar el próximo Local File Header o EOCD para calcular el tamaño
-                next_pk = data.find(b'PK', file_data_start + 1)
-                if next_pk == -1:
-                    comp_size = len(data) - file_data_start
-                else:
-                    comp_size = next_pk - file_data_start
-                    # Descontar posible Data Descriptor (12 o 16 bytes: PK\x07\x08 + crc + comp + uncomp)
-                    if data[next_pk:next_pk+4] == b'PK\x07\x08':
-                        comp_size = max(0, comp_size - 16)
-
-            file_data_end = file_data_start + comp_size
-            if file_data_end > len(data):
-                file_data_end = len(data)
-
-            compressed_data = data[file_data_start:file_data_end]
-
-            # Descomprimir según el método
+            # Extraer datos según método de compresión
             try:
-                if method == 0:   # Store (sin compresión)
-                    file_content = compressed_data
-                elif method == 8: # Deflate
-                    file_content = zlib.decompress(compressed_data, -15)
+                if method == 0:
+                    # ── Stored (sin compresión) ──────────────────────────────
+                    if comp_size > 0:
+                        file_content = data[file_data_start: file_data_start + comp_size]
+                        pos_after = file_data_start + comp_size
+                    else:
+                        # Data Descriptor: buscar siguiente PK header
+                        next_pk = data.find(b'PK', file_data_start + 1)
+                        end = next_pk if next_pk != -1 else len(data)
+                        file_content = data[file_data_start:end]
+                        pos_after = end
+
+                elif method == 8:
+                    # ── Deflate ──────────────────────────────────────────────
+                    # Usar decompressobj: unused_data indica exactamente
+                    # cuántos bytes vienen DESPUÉS del fin del stream deflate.
+                    # Con esto NO necesitamos conocer comp_size de antemano.
+                    dobj = zlib.decompressobj(-15)
+                    try:
+                        file_content = dobj.decompress(data[file_data_start:])
+                        file_content += dobj.flush()
+                    except zlib.error:
+                        # Si falla en mitad, tomar lo que se pudo descomprimir
+                        file_content = dobj.decompress(data[file_data_start:], max_length=10*1024*1024)
+                    
+                    # Calcular cuántos bytes consumió el depresor
+                    actual_comp = len(data) - file_data_start - len(dobj.unused_data)
+                    pos_after = file_data_start + max(actual_comp, 1)
+
                 else:
-                    self.log(f"  Método de compresión {method} no soportado para: {fname}")
-                    pos = file_data_end
+                    self.log(f"  Método de compresión {method} no soportado: {fname}")
+                    pos = file_data_start + (comp_size if comp_size > 0 else 1)
                     continue
+
+                if not file_content:
+                    self.log(f"  Archivo vacío ignorado: {fname}")
+                    pos = pos_after
+                    continue
+
+                # Escribir al disco
+                out_path = os.path.join(extract_path, fname.replace('/', os.sep))
+                os.makedirs(os.path.dirname(out_path), exist_ok=True)
+                with open(out_path, 'wb') as f:
+                    f.write(file_content)
+
+                extracted.append(fname)
+                self.log(f"  Extraído: {fname} ({len(file_content):,} bytes)")
+                pos = pos_after
+
             except Exception as e:
                 self.log(f"  Aviso al descomprimir '{fname}': {e}")
-                pos = file_data_end
-                continue
+                failed.append(fname)
+                # Avanzar para no quedar en bucle infinito
+                pos = file_data_start + (comp_size if comp_size > 0 else 1)
 
-            # Escribir el archivo extraído
-            out_path = os.path.join(extract_path, fname.replace('/', os.sep))
-            os.makedirs(os.path.dirname(out_path), exist_ok=True)
-            with open(out_path, 'wb') as f:
-                f.write(file_content)
-
-            extracted.append(fname)
-            self.log(f"  Extraído: {fname} ({len(file_content)} bytes)")
-            pos = file_data_end
-
-        return extracted
+        return extracted, failed
 
     def extract(self, unf_path):
         temp_dir = tempfile.mkdtemp()
@@ -161,12 +165,12 @@ class UnifiExtractor:
 
             zip_bytes = None
 
-            # --- Paso 1: ¿Ya es un ZIP? ---
+            # ── Paso 1: ¿Ya es un ZIP? ────────────────────────────────────
             if raw_data[:4] == ZIP_LOCAL_HEADER:
                 self.log("Archivo ZIP detectado directamente (sin encriptación).")
                 zip_bytes = raw_data
             else:
-                # --- Paso 2: Desencriptar AES-128-CBC NoPadding ---
+                # ── Paso 2: Desencriptar AES-128-CBC NoPadding ────────────
                 self.log("Desencriptando .unf con clave oficial Ubiquiti (AES-128-CBC)...")
                 try:
                     cipher = Cipher(
@@ -180,70 +184,81 @@ class UnifiExtractor:
                 except Exception as e:
                     raise Exception(f"Fallo en la desencriptación AES: {e}")
 
-                # --- Paso 3: Buscar inicio del ZIP (PK magic bytes) ---
+                # ── Paso 3: Localizar inicio del ZIP ─────────────────────
                 offset = decrypted.find(ZIP_LOCAL_HEADER)
                 if offset == -1:
                     raise Exception(
                         "No se encontró un ZIP válido tras la desencriptación.\n"
-                        "Verifica que el archivo sea un backup de UniFi Network (.unf)."
+                        "Verifica que el archivo sea un backup válido de UniFi Network."
                     )
                 if offset > 0:
-                    self.log(f"Ajustando offset del ZIP: {offset} bytes.")
+                    self.log(f"Ajustando offset del ZIP: {offset} bytes omitidos.")
                 zip_bytes = decrypted[offset:]
 
             self.update_progress(0.3)
 
-            # --- Paso 4: Extraer contenido ---
+            # ── Paso 4: Extraer contenido del ZIP ─────────────────────────
             extract_path = os.path.join(temp_dir, "extracted")
             os.makedirs(extract_path, exist_ok=True)
             self.log("Extrayendo contenido del backup...")
 
             # Intentar primero con zipfile estándar
-            extracted_ok = False
             try:
                 with zipfile.ZipFile(io.BytesIO(zip_bytes), 'r') as zip_ref:
                     zip_ref.extractall(extract_path)
-                extracted_ok = True
                 self.log("Extracción ZIP estándar exitosa.")
-            except (zipfile.BadZipFile, Exception) as e:
-                self.log(f"ZIP estándar falló ({e}). Usando extracción forzada (modo zip -FF)...")
-                extracted = self._force_extract(zip_bytes, extract_path)
-                if not extracted:
-                    raise Exception("La extracción forzada no encontró ningún archivo en el backup.")
-                extracted_ok = True
+            except Exception as e:
+                self.log(f"ZIP estándar falló ({e}). Usando extracción forzada...")
+                extracted, failed = self._force_extract(zip_bytes, extract_path)
 
-            if not extracted_ok:
-                raise Exception("No se pudo extraer el contenido del backup.")
+                if not extracted and not failed:
+                    raise Exception("No se encontraron entradas de archivo en el backup.")
+                if not extracted:
+                    raise Exception(
+                        f"Se encontraron {len(failed)} archivos pero ninguno pudo extraerse.\n"
+                        f"Archivos fallidos: {', '.join(failed)}"
+                    )
+                self.log(f"Extracción forzada: {len(extracted)} archivos OK, {len(failed)} con aviso.")
 
             self.update_progress(0.5)
 
-            # --- Paso 5: Localizar db.gz ---
+            # ── Paso 5: Localizar la base de datos (db.gz) ────────────────
             db_gz_path = None
             db_bson_path = os.path.join(temp_dir, "db.bson")
 
-            self.log("Buscando base de datos (db.gz)...")
+            self.log("Buscando base de datos...")
+            # Prioridad: db.gz → db → cualquier .gz en la raíz
             for root, dirs, files in os.walk(extract_path):
-                if "db.gz" in files:
-                    db_gz_path = os.path.join(root, "db.gz")
+                for candidate in ["db.gz", "db"]:
+                    if candidate in files:
+                        db_gz_path = os.path.join(root, candidate)
+                        self.log(f"Base de datos encontrada: {candidate}")
+                        break
+                if db_gz_path:
                     break
-                if "db" in files:
-                    db_gz_path = os.path.join(root, "db")
-                    self.log("Detectado archivo db (BSON) sin compresión gz.")
-                    break
+
+            # Si no hay db.gz exacto, buscar cualquier .gz que pueda contener BSON
+            if not db_gz_path:
+                for root, dirs, files in os.walk(extract_path):
+                    for f in files:
+                        if f.endswith('.gz') and not f.startswith('db_stat'):
+                            db_gz_path = os.path.join(root, f)
+                            self.log(f"Usando archivo alternativo: {f}")
+                            break
+                    if db_gz_path:
+                        break
 
             if not db_gz_path:
                 found = []
                 for root, dirs, files in os.walk(extract_path):
-                    for fname in files:
-                        found.append(os.path.relpath(os.path.join(root, fname), extract_path))
+                    for f in files:
+                        found.append(os.path.relpath(os.path.join(root, f), extract_path))
                 raise Exception(
-                    f"No se encontró db.gz dentro del backup.\n"
-                    f"Archivos encontrados: {', '.join(found) if found else 'ninguno'}"
+                    f"No se encontró la base de datos (db.gz o db) dentro del backup.\n"
+                    f"Archivos disponibles: {', '.join(found) if found else 'ninguno'}"
                 )
 
-            self.log(f"Base de datos encontrada: {os.path.basename(db_gz_path)}")
-
-            # --- Paso 6: Descomprimir db.gz → BSON ---
+            # ── Paso 6: Descomprimir db.gz → BSON ────────────────────────
             if db_gz_path.endswith(".gz"):
                 self.log("Descomprimiendo db.gz...")
                 with gzip.open(db_gz_path, 'rb') as f_in:
@@ -254,7 +269,7 @@ class UnifiExtractor:
 
             self.update_progress(0.7)
 
-            # --- Paso 7: BSON → JSON ---
+            # ── Paso 7: BSON → JSON ───────────────────────────────────────
             self.log("Convirtiendo BSON a JSON...")
             with open(db_bson_path, 'rb') as f:
                 data = decode_all(f.read())
