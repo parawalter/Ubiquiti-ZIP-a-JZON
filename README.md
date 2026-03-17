@@ -1,7 +1,7 @@
 # UniFi UNF/ZIP to JSON Extractor 🚀
 
 **Autor:** Ing. Walter Rodríguez  
-**Versión:** v1.0.0  
+**Versión:** v1.1.0  
 **Última actualización:** 17/03/2026
 
 ---
