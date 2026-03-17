@@ -23,7 +23,7 @@ class App(ctk.CTk):
         # 1. Definir variables básicas
         self.width = 750
         self.height = 650
-        self.version = "v1.0.0"
+        self.version = "v1.1.0"
         self.author = "Ing. Walter Rodríguez"
         self.description = "Esta herramienta permite extraer y convertir archivos de backup (.unf) de UniFi Network a un formato JSON legible, facilitando la auditoría y migración de configuraciones de red, redes WiFi y dispositivos."
         self.selected_file = None  # Archivo seleccionado por el usuario
